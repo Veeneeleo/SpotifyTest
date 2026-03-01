@@ -2,42 +2,34 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Spotify Seek Test</title>
+  <title>Spotify Test (Web Playback SDK)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body { font-family: system-ui, Arial; max-width: 900px; margin: 24px auto; padding: 0 16px; }
-    input, button, select { padding: 8px; font-size: 14px; }
+    input, button { padding: 8px; font-size: 14px; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
     .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin-top: 12px; }
-    .track { padding: 8px; border-bottom: 1px solid #eee; display:flex; justify-content:space-between; gap: 12px; }
+    .track { padding: 10px 8px; border-bottom: 1px solid #eee; display:flex; justify-content:space-between; gap: 12px; }
     .track:last-child { border-bottom: none; }
     .muted { color: #666; }
     .danger { color: #b00020; }
+    pre { white-space: pre-wrap; margin: 0; }
   </style>
 </head>
 <body>
 
-<h1>Spotify Web API — Play + Seek</h1>
+<h1>Spotify — Click Track → Plays In Browser → Seek</h1>
 
 <div class="card">
   <div class="row">
     <button id="loginBtn">Login</button>
     <button id="logoutBtn">Logout</button>
   </div>
-  <div id="authStatus"></div>
+  <div id="status" class="muted">Not logged in.</div>
 </div>
 
 <div class="card">
-  <h2>Devices</h2>
-  <div class="row">
-    <button id="refreshDevicesBtn">Refresh Devices</button>
-    <select id="deviceSelect"></select>
-    <button id="transferBtn">Transfer</button>
-  </div>
-</div>
-
-<div class="card">
-  <h2>Search + Play</h2>
+  <h2>Search</h2>
   <div class="row">
     <input id="query" style="min-width:360px" placeholder="Search for a track..." />
     <button id="searchBtn">Search</button>
@@ -48,186 +40,408 @@
 <div class="card">
   <h2>Seek</h2>
   <div class="row">
+    <label>position_ms:</label>
     <input id="seekMs" type="number" value="9600" min="0" />
     <button id="seekBtn">Seek</button>
   </div>
+  <div class="muted">Example: 9600 = 9.6 seconds</div>
 </div>
 
 <div class="card">
   <h2>Log</h2>
-  <pre id="log" style="white-space:pre-wrap;"></pre>
+  <pre id="log"></pre>
 </div>
+
+<!-- Spotify Web Playback SDK -->
+<script src="https://sdk.scdn.co/spotify-player.js"></script>
 
 <script>
 (() => {
+  // ====== Config (hardcoded) ======
+  const CLIENT_ID = "81cff1fc219b442abfb47d9a3bba8960";
+  const REDIRECT_URI = "https://veeneeleo.github.io/SpotifyTest/";
+  const AUTH_ENDPOINT = "https://accounts.spotify.com/authorize";
+  const TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token";
+  const API_BASE = "https://api.spotify.com/v1";
 
-const CLIENT_ID = "81cff1fc219b442abfb47d9a3bba8960";
-const REDIRECT_URI = "https://veeneeleo.github.io/SpotifyTest/";
-const AUTH_ENDPOINT = "https://accounts.spotify.com/authorize";
-const TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token";
-const API_BASE = "https://api.spotify.com/v1";
+  // Web Playback SDK requires Premium + "streaming" scope
+  const SCOPES = [
+    "streaming",
+    "user-read-email",
+    "user-read-private",
+    "user-read-playback-state",
+    "user-modify-playback-state"
+  ].join(" ");
 
-const SCOPES = "user-read-playback-state user-modify-playback-state";
+  // ====== Storage keys ======
+  const LS = {
+    access: "sp_access",
+    refresh: "sp_refresh",
+    exp: "sp_exp",
+    verifier: "sp_verifier"
+  };
 
-const LS = {
-  access: "sp_access",
-  refresh: "sp_refresh",
-  exp: "sp_exp",
-  verifier: "sp_verifier"
-};
+  // ====== UI helpers ======
+  const $ = (id) => document.getElementById(id);
+  const log = (msg) => $("log").textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + $("log").textContent;
 
-const $ = id => document.getElementById(id);
-const log = msg => $("log").textContent = msg + "\n" + $("log").textContent;
+  function setStatus(html) { $("status").innerHTML = html; }
 
-function base64url(bytes) {
-  return btoa(String.fromCharCode(...new Uint8Array(bytes)))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
+  // ====== PKCE helpers ======
+  function base64url(bytes) {
+    return btoa(String.fromCharCode(...new Uint8Array(bytes)))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
 
-async function sha256(plain) {
-  const enc = new TextEncoder().encode(plain);
-  return await crypto.subtle.digest("SHA-256", enc);
-}
+  async function sha256(plain) {
+    const enc = new TextEncoder().encode(plain);
+    return await crypto.subtle.digest("SHA-256", enc);
+  }
 
-function randomString(len=64){
-  const chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  return Array.from(crypto.getRandomValues(new Uint8Array(len)))
-    .map(x=>chars[x%chars.length]).join("");
-}
+  function randomString(len = 64) {
+    const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    const bytes = crypto.getRandomValues(new Uint8Array(len));
+    return Array.from(bytes, b => charset[b % charset.length]).join("");
+  }
 
-async function login(){
-  const verifier=randomString(64);
-  localStorage.setItem(LS.verifier,verifier);
-  const challenge=base64url(await sha256(verifier));
+  async function pkceChallenge(verifier) {
+    return base64url(await sha256(verifier));
+  }
 
-  const params=new URLSearchParams({
-    response_type:"code",
-    client_id:CLIENT_ID,
-    scope:SCOPES,
-    redirect_uri:REDIRECT_URI,
-    code_challenge_method:"S256",
-    code_challenge:challenge
+  // ====== Token helpers ======
+  function tokenObj() {
+    const token = localStorage.getItem(LS.access);
+    const exp = Number(localStorage.getItem(LS.exp) || "0");
+    const refresh = localStorage.getItem(LS.refresh);
+    return token ? { access_token: token, expires_at: exp, refresh_token: refresh } : null;
+  }
+
+  async function refreshAccessToken() {
+    const refresh_token = localStorage.getItem(LS.refresh);
+    if (!refresh_token) throw new Error("No refresh token. Login again.");
+
+    const body = new URLSearchParams();
+    body.set("client_id", CLIENT_ID);
+    body.set("grant_type", "refresh_token");
+    body.set("refresh_token", refresh_token);
+
+    const resp = await fetch(TOKEN_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`Refresh failed: ${resp.status} ${JSON.stringify(data)}`);
+
+    localStorage.setItem(LS.access, data.access_token);
+    localStorage.setItem(LS.exp, String(Date.now() + data.expires_in * 1000 - 5000));
+    log("Refreshed access token.");
+    return data.access_token;
+  }
+
+  async function getValidAccessToken() {
+    const t = tokenObj();
+    if (!t) return null;
+    if (Date.now() > t.expires_at) {
+      return await refreshAccessToken();
+    }
+    return t.access_token;
+  }
+
+  async function apiFetch(path, { method = "GET", query = null, json = null } = {}) {
+    let token = await getValidAccessToken();
+    if (!token) throw new Error("Not logged in.");
+
+    const url = new URL(API_BASE + path);
+    if (query) Object.entries(query).forEach(([k, v]) => url.searchParams.set(k, String(v)));
+
+    const doReq = async (accessToken) => {
+      const resp = await fetch(url.toString(), {
+        method,
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          ...(json ? { "Content-Type": "application/json" } : {})
+        },
+        body: json ? JSON.stringify(json) : undefined
+      });
+      if (resp.status === 204) return null;
+      const text = await resp.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!resp.ok) {
+        const err = new Error(`API ${method} ${path} failed: ${resp.status}`);
+        err.status = resp.status;
+        err.data = data;
+        throw err;
+      }
+      return data;
+    };
+
+    try {
+      return await doReq(token);
+    } catch (e) {
+      if (e.status === 401) {
+        token = await refreshAccessToken();
+        return await doReq(token);
+      }
+      throw e;
+    }
+  }
+
+  // ====== Auth ======
+  async function login() {
+    const verifier = randomString(64);
+    localStorage.setItem(LS.verifier, verifier);
+    const challenge = await pkceChallenge(verifier);
+
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id: CLIENT_ID,
+      scope: SCOPES,
+      redirect_uri: REDIRECT_URI,
+      code_challenge_method: "S256",
+      code_challenge: challenge
+    });
+
+    window.location = `${AUTH_ENDPOINT}?${params.toString()}`;
+  }
+
+  async function handleRedirect() {
+    const url = new URL(window.location.href);
+    const code = url.searchParams.get("code");
+    const error = url.searchParams.get("error");
+    if (error) {
+      setStatus(`<span class="danger">Auth error: ${error}</span>`);
+      url.searchParams.delete("error");
+      history.replaceState({}, document.title, url.toString());
+      return;
+    }
+    if (!code) return;
+
+    const verifier = localStorage.getItem(LS.verifier);
+    if (!verifier) throw new Error("Missing PKCE verifier. Click Login again.");
+
+    const body = new URLSearchParams();
+    body.set("client_id", CLIENT_ID);
+    body.set("grant_type", "authorization_code");
+    body.set("code", code);
+    body.set("redirect_uri", REDIRECT_URI);
+    body.set("code_verifier", verifier);
+
+    const resp = await fetch(TOKEN_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`Token exchange failed: ${resp.status} ${JSON.stringify(data)}`);
+
+    localStorage.setItem(LS.access, data.access_token);
+    if (data.refresh_token) localStorage.setItem(LS.refresh, data.refresh_token);
+    localStorage.setItem(LS.exp, String(Date.now() + data.expires_in * 1000 - 5000));
+
+    url.searchParams.delete("code");
+    url.searchParams.delete("state");
+    history.replaceState({}, document.title, url.toString());
+
+    log("Logged in.");
+  }
+
+  function logout() {
+    localStorage.removeItem(LS.access);
+    localStorage.removeItem(LS.refresh);
+    localStorage.removeItem(LS.exp);
+    localStorage.removeItem(LS.verifier);
+    setStatus("Not logged in.");
+    log("Logged out.");
+  }
+
+  // ====== Web Playback SDK ======
+  let player = null;
+  let deviceId = null;
+  let lastTrackUri = null;
+
+  function ensurePremiumMessage() {
+    setStatus(`✅ Logged in. Initializing browser player… <span class="muted">(Requires Spotify Premium)</span>`);
+  }
+
+  async function initPlayer() {
+    const token = await getValidAccessToken();
+    if (!token) {
+      setStatus("Not logged in.");
+      return;
+    }
+
+    ensurePremiumMessage();
+
+    // Wait until SDK is ready
+    if (!window.Spotify) {
+      setStatus(`<span class="danger">Spotify SDK failed to load. Are you blocking scripts?</span>`);
+      return;
+    }
+
+    if (player) return; // already init
+
+    player = new Spotify.Player({
+      name: "SpotifyTest (This Browser)",
+      getOAuthToken: cb => cb(token),
+      volume: 0.8
+    });
+
+    player.addListener("ready", ({ device_id }) => {
+      deviceId = device_id;
+      setStatus(`✅ Logged in. Browser player ready: <b>This Browser</b>`);
+      log(`Player ready. device_id=${device_id}`);
+      // Make THIS browser the active device immediately
+      transferPlaybackHere().catch(e => log(`Transfer error: ${e.message}`));
+    });
+
+    player.addListener("not_ready", ({ device_id }) => {
+      log(`Player not ready: ${device_id}`);
+    });
+
+    player.addListener("initialization_error", ({ message }) => {
+      setStatus(`<span class="danger">Init error: ${message}</span>`);
+      log(`Init error: ${message}`);
+    });
+    player.addListener("authentication_error", ({ message }) => {
+      setStatus(`<span class="danger">Auth error: ${message}</span>`);
+      log(`Auth error: ${message}`);
+    });
+    player.addListener("account_error", ({ message }) => {
+      setStatus(`<span class="danger">Account error: ${message} (Premium required)</span>`);
+      log(`Account error: ${message}`);
+    });
+    player.addListener("playback_error", ({ message }) => {
+      log(`Playback error: ${message}`);
+    });
+
+    await player.connect();
+  }
+
+  async function transferPlaybackHere() {
+    if (!deviceId) return;
+    await apiFetch("/me/player", {
+      method: "PUT",
+      json: { device_ids: [deviceId], play: false }
+    });
+    log("Transferred playback to browser player.");
+  }
+
+  async function playTrackInBrowser(trackUri) {
+    if (!deviceId) {
+      await initPlayer(); // try init
+      if (!deviceId) throw new Error("Browser player not ready yet.");
+    }
+
+    lastTrackUri = trackUri;
+
+    await apiFetch("/me/player/play", {
+      method: "PUT",
+      query: { device_id: deviceId },
+      json: { uris: [trackUri] }
+    });
+
+    log(`Playing in browser: ${trackUri}`);
+  }
+
+  async function seekMs(position_ms) {
+    if (!deviceId) throw new Error("Browser player not ready.");
+    await apiFetch("/me/player/seek", {
+      method: "PUT",
+      query: { device_id: deviceId, position_ms }
+    });
+    log(`Seeked to ${position_ms} ms`);
+  }
+
+  // ====== Search UI ======
+  async function searchTracks() {
+    const q = $("query").value.trim();
+    if (!q) return;
+
+    const data = await apiFetch("/search", { query: { q, type: "track", limit: 10 } });
+    const items = data?.tracks?.items || [];
+    const results = $("results");
+    results.innerHTML = "";
+
+    if (!items.length) {
+      results.textContent = "No results.";
+      return;
+    }
+
+    for (const t of items) {
+      const div = document.createElement("div");
+      div.className = "track";
+      const artist = (t.artists || []).map(a => a.name).join(", ");
+      div.innerHTML = `
+        <div>
+          <div><strong>${t.name}</strong></div>
+          <div class="muted">${artist}</div>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button>Play</button>
+        </div>
+      `;
+      div.querySelector("button").addEventListener("click", async () => {
+        try {
+          await playTrackInBrowser(t.uri);
+        } catch (e) {
+          log(`Play error: ${e.message} ${e.data ? JSON.stringify(e.data) : ""}`);
+          alert(
+            "Play failed. Most common causes:\n" +
+            "• You are not Premium (Web Playback SDK requires Premium)\n" +
+            "• You didn’t allow the required scopes\n" +
+            "• Your redirect URI in Spotify dashboard doesn’t match exactly\n\n" +
+            "Check Log for details."
+          );
+        }
+      });
+      results.appendChild(div);
+    }
+
+    log(`Search ok: ${q}`);
+  }
+
+  // ====== Wire up buttons ======
+  $("loginBtn").addEventListener("click", login);
+  $("logoutBtn").addEventListener("click", logout);
+  $("searchBtn").addEventListener("click", async () => {
+    try { await initPlayer(); await searchTracks(); }
+    catch (e) { log(`Search/init error: ${e.message}`); }
+  });
+  $("seekBtn").addEventListener("click", async () => {
+    try {
+      const ms = Number($("seekMs").value);
+      if (!Number.isFinite(ms) || ms < 0) return alert("Enter a non-negative number (ms).");
+      // If nothing playing yet, try to re-play last selected track (optional convenience)
+      if (!lastTrackUri) log("Note: Seek works best after you’ve started a track.");
+      await seekMs(ms);
+    } catch (e) {
+      log(`Seek error: ${e.message} ${e.data ? JSON.stringify(e.data) : ""}`);
+      alert("Seek failed. Make sure a track is playing in the browser player (Premium required).");
+    }
   });
 
-  window.location=`${AUTH_ENDPOINT}?${params.toString()}`;
-}
-
-async function exchangeCode(){
-  const url=new URL(window.location);
-  const code=url.searchParams.get("code");
-  if(!code) return;
-
-  const verifier=localStorage.getItem(LS.verifier);
-  const body=new URLSearchParams({
-    client_id:CLIENT_ID,
-    grant_type:"authorization_code",
-    code,
-    redirect_uri:REDIRECT_URI,
-    code_verifier:verifier
-  });
-
-  const resp=await fetch(TOKEN_ENDPOINT,{
-    method:"POST",
-    headers:{"Content-Type":"application/x-www-form-urlencoded"},
-    body
-  });
-
-  const data=await resp.json();
-  localStorage.setItem(LS.access,data.access_token);
-  localStorage.setItem(LS.refresh,data.refresh_token);
-  localStorage.setItem(LS.exp,Date.now()+data.expires_in*1000);
-
-  url.searchParams.delete("code");
-  history.replaceState({},document.title,url.toString());
-  setAuthStatus();
-}
-
-function getToken(){
-  return localStorage.getItem(LS.access);
-}
-
-function setAuthStatus(){
-  $("authStatus").innerHTML=getToken()
-    ? "✅ Logged in"
-    : "<span class='danger'>❌ Not logged in</span>";
-}
-
-async function api(path,{method="GET",query=null,json=null,deviceId=null}={}){
-  const token=getToken();
-  const url=new URL(API_BASE+path);
-  if(query) Object.entries(query).forEach(([k,v])=>url.searchParams.set(k,v));
-  if(deviceId) url.searchParams.set("device_id",deviceId);
-
-  const resp=await fetch(url,{
-    method,
-    headers:{
-      "Authorization":`Bearer ${token}`,
-      ...(json?{"Content-Type":"application/json"}:{})
-    },
-    body:json?JSON.stringify(json):undefined
-  });
-
-  if(resp.status===204) return null;
-  return resp.json();
-}
-
-async function refreshDevices(){
-  const data=await api("/me/player/devices");
-  const sel=$("deviceSelect");
-  sel.innerHTML="";
-  data.devices.forEach(d=>{
-    const opt=document.createElement("option");
-    opt.value=d.id;
-    opt.textContent=`${d.name} (${d.type})`;
-    if(d.is_active) opt.selected=true;
-    sel.appendChild(opt);
-  });
-}
-
-async function transfer(){
-  const device_id=$("deviceSelect").value;
-  await api("/me/player",{method:"PUT",json:{device_ids:[device_id],play:true}});
-}
-
-async function search(){
-  const q=$("query").value;
-  const data=await api("/search",{query:{q,type:"track",limit:5}});
-  const results=$("results");
-  results.innerHTML="";
-  data.tracks.items.forEach(t=>{
-    const div=document.createElement("div");
-    div.className="track";
-    div.innerHTML=`<div><strong>${t.name}</strong> - ${t.artists[0].name}</div>
-                   <button data-uri="${t.uri}">Play</button>`;
-    div.querySelector("button").onclick=()=>play(t.uri);
-    results.appendChild(div);
-  });
-}
-
-async function play(uri){
-  const device_id=$("deviceSelect").value;
-  await api("/me/player/play",{method:"PUT",deviceId:device_id,json:{uris:[uri]}});
-}
-
-async function seek(){
-  const device_id=$("deviceSelect").value;
-  const position_ms=$("seekMs").value;
-  await api("/me/player/seek",{method:"PUT",deviceId:device_id,query:{position_ms}});
-  log("Seeked to "+position_ms+" ms");
-}
-
-$("loginBtn").onclick=login;
-$("logoutBtn").onclick=()=>{localStorage.clear();setAuthStatus();}
-$("refreshDevicesBtn").onclick=refreshDevices;
-$("transferBtn").onclick=transfer;
-$("searchBtn").onclick=search;
-$("seekBtn").onclick=seek;
-
-exchangeCode();
-setAuthStatus();
+  // ====== On load ======
+  (async () => {
+    try {
+      await handleRedirect();
+      const t = tokenObj();
+      if (t) {
+        setStatus("✅ Logged in. Initializing browser player… <span class='muted'>(Requires Spotify Premium)</span>");
+        await initPlayer();
+      } else {
+        setStatus("Not logged in.");
+      }
+    } catch (e) {
+      setStatus(`<span class="danger">${e.message}</span>`);
+      log(`Startup error: ${e.message}`);
+    }
+  })();
 
 })();
 </script>
-
 </body>
 </html>
