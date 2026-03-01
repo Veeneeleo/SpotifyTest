@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Spotify Web API Seek Test</title>
+  <title>Spotify Seek Test</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body { font-family: system-ui, Arial; max-width: 900px; margin: 24px auto; padding: 0 16px; }
@@ -11,428 +11,223 @@
     .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin-top: 12px; }
     .track { padding: 8px; border-bottom: 1px solid #eee; display:flex; justify-content:space-between; gap: 12px; }
     .track:last-child { border-bottom: none; }
-    code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
     .muted { color: #666; }
     .danger { color: #b00020; }
   </style>
 </head>
 <body>
-  <h1>Spotify Web API — Play + Seek (ms)</h1>
 
-  <div class="card">
-    <div class="row">
-      <label>Client ID:</label>
-      <input id="clientId" style="min-width:340px" placeholder="81cff1fc219b442abfb47d9a3bba8960" />
-      <button id="loginBtn">Login (PKCE)</button>
-      <button id="logoutBtn">Logout</button>
-    </div>
-    <div class="row muted">
-      Redirect URI must be set to <code>http://localhost:8000/</code> in your Spotify app settings.
-    </div>
-    <div id="authStatus" class="row"></div>
-  </div>
+<h1>Spotify Web API — Play + Seek</h1>
 
-  <div class="card">
-    <h2>Device</h2>
-    <div class="row">
-      <button id="refreshDevicesBtn">Refresh Devices</button>
-      <select id="deviceSelect" style="min-width:360px"></select>
-      <button id="transferBtn">Transfer to Selected Device</button>
-    </div>
-    <div class="muted">
-      Tip: open Spotify on your phone/desktop first so a device appears.
-    </div>
+<div class="card">
+  <div class="row">
+    <button id="loginBtn">Login</button>
+    <button id="logoutBtn">Logout</button>
   </div>
+  <div id="authStatus"></div>
+</div>
 
-  <div class="card">
-    <h2>Search + Play</h2>
-    <div class="row">
-      <input id="query" style="min-width:360px" placeholder="Search for a track (e.g., 'Daft Punk One More Time')" />
-      <button id="searchBtn">Search</button>
-    </div>
-    <div id="results"></div>
+<div class="card">
+  <h2>Devices</h2>
+  <div class="row">
+    <button id="refreshDevicesBtn">Refresh Devices</button>
+    <select id="deviceSelect"></select>
+    <button id="transferBtn">Transfer</button>
   </div>
+</div>
 
-  <div class="card">
-    <h2>Seek</h2>
-    <div class="row">
-      <label>position_ms:</label>
-      <input id="seekMs" type="number" value="9600" min="0" />
-      <button id="seekBtn">Seek</button>
-    </div>
-    <div class="muted">
-      Example: <code>9600</code> = 9.6 seconds into the track.
-    </div>
+<div class="card">
+  <h2>Search + Play</h2>
+  <div class="row">
+    <input id="query" style="min-width:360px" placeholder="Search for a track..." />
+    <button id="searchBtn">Search</button>
   </div>
+  <div id="results"></div>
+</div>
 
-  <div class="card">
-    <h2>Debug</h2>
-    <pre id="log" style="white-space:pre-wrap; margin:0;"></pre>
+<div class="card">
+  <h2>Seek</h2>
+  <div class="row">
+    <input id="seekMs" type="number" value="9600" min="0" />
+    <button id="seekBtn">Seek</button>
   </div>
+</div>
+
+<div class="card">
+  <h2>Log</h2>
+  <pre id="log" style="white-space:pre-wrap;"></pre>
+</div>
 
 <script>
 (() => {
-  // ====== Config ======
-  const REDIRECT_URI = "https://veeneeleo.github.io/SpotifyTest/";
-  const AUTH_ENDPOINT = "https://accounts.spotify.com/authorize";
-  const TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token";
-  const API_BASE = "https://api.spotify.com/v1";
 
-  // Scopes needed for devices + play + seek
-  // user-modify-playback-state: play/seek/transfer
-  // user-read-playback-state: list devices (and other status)
-  const SCOPES = [
-    "user-read-playback-state",
-    "user-modify-playback-state"
-  ].join(" ");
+const CLIENT_ID = "81cff1fc219b442abfb47d9a3bba8960";
+const REDIRECT_URI = "https://veeneeleo.github.io/SpotifyTest/";
+const AUTH_ENDPOINT = "https://accounts.spotify.com/authorize";
+const TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token";
+const API_BASE = "https://api.spotify.com/v1";
 
-  // ====== UI ======
-  const $ = (id) => document.getElementById(id);
-  const log = (msg) => { $("log").textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + $("log").textContent; };
+const SCOPES = "user-read-playback-state user-modify-playback-state";
 
-  // ====== PKCE helpers ======
-  function base64url(bytes) {
-    return btoa(String.fromCharCode(...new Uint8Array(bytes)))
-      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  }
+const LS = {
+  access: "sp_access",
+  refresh: "sp_refresh",
+  exp: "sp_exp",
+  verifier: "sp_verifier"
+};
 
-  function randomString(len = 64) {
-    const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-    const bytes = crypto.getRandomValues(new Uint8Array(len));
-    return Array.from(bytes, b => charset[b % charset.length]).join("");
-  }
+const $ = id => document.getElementById(id);
+const log = msg => $("log").textContent = msg + "\n" + $("log").textContent;
 
-  async function sha256(plain) {
-    const enc = new TextEncoder().encode(plain);
-    return await crypto.subtle.digest("SHA-256", enc);
-  }
+function base64url(bytes) {
+  return btoa(String.fromCharCode(...new Uint8Array(bytes)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
-  async function pkceChallengeFromVerifier(verifier) {
-    const hashed = await sha256(verifier);
-    return base64url(hashed);
-  }
+async function sha256(plain) {
+  const enc = new TextEncoder().encode(plain);
+  return await crypto.subtle.digest("SHA-256", enc);
+}
 
-  function setAuthStatus() {
-    const token = getToken();
-    if (token) {
-      $("authStatus").innerHTML = `<span>✅ Logged in</span>`;
-    } else {
-      $("authStatus").innerHTML = `<span class="danger">❌ Not logged in</span>`;
-    }
-  }
+function randomString(len=64){
+  const chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  return Array.from(crypto.getRandomValues(new Uint8Array(len)))
+    .map(x=>chars[x%chars.length]).join("");
+}
 
-  // ====== Token storage ======
-  const LS = {
-    access: "sp_access_token",
-    refresh: "sp_refresh_token",
-    exp: "sp_token_expires_at",
-    verifier: "sp_code_verifier"
-  };
+async function login(){
+  const verifier=randomString(64);
+  localStorage.setItem(LS.verifier,verifier);
+  const challenge=base64url(await sha256(verifier));
 
-  function getToken() {
-    const token = localStorage.getItem(LS.access);
-    const exp = Number(localStorage.getItem(LS.exp) || "0");
-    if (!token) return null;
-    // Return token even if expired; caller should refresh on 401
-    return { access_token: token, expires_at: exp };
-  }
-
-  function clearToken() {
-    localStorage.removeItem(LS.access);
-    localStorage.removeItem(LS.refresh);
-    localStorage.removeItem(LS.exp);
-    localStorage.removeItem(LS.verifier);
-    setAuthStatus();
-  }
-
-  async function refreshAccessToken(clientId) {
-    const refresh_token = localStorage.getItem(LS.refresh);
-    if (!refresh_token) throw new Error("No refresh token available; login again.");
-
-    const body = new URLSearchParams();
-    body.set("client_id", clientId);
-    body.set("grant_type", "refresh_token");
-    body.set("refresh_token", refresh_token);
-
-    const resp = await fetch(TOKEN_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body
-    });
-
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(`Refresh failed: ${resp.status} ${JSON.stringify(data)}`);
-
-    localStorage.setItem(LS.access, data.access_token);
-    const expiresAt = Date.now() + (data.expires_in * 1000) - 5000;
-    localStorage.setItem(LS.exp, String(expiresAt));
-    // refresh_token may or may not be returned on refresh
-    log("Refreshed access token.");
-    setAuthStatus();
-    return data.access_token;
-  }
-
-  async function apiFetch(path, { method = "GET", query = null, json = null, deviceId = null } = {}) {
-    const clientId = $("clientId").value.trim();
-    if (!clientId) throw new Error("Enter your Client ID first.");
-
-    let tokenObj = getToken();
-    if (!tokenObj) throw new Error("Not logged in.");
-
-    // Proactive refresh if expired
-    if (Date.now() > tokenObj.expires_at) {
-      await refreshAccessToken(clientId);
-      tokenObj = getToken();
-    }
-
-    const url = new URL(API_BASE + path);
-    if (query) Object.entries(query).forEach(([k, v]) => url.searchParams.set(k, String(v)));
-    if (deviceId) url.searchParams.set("device_id", deviceId);
-
-    const doReq = async (accessToken) => {
-      const resp = await fetch(url.toString(), {
-        method,
-        headers: {
-          "Authorization": `Bearer ${accessToken}`,
-          ...(json ? { "Content-Type": "application/json" } : {})
-        },
-        body: json ? JSON.stringify(json) : undefined
-      });
-      if (resp.status === 204) return null;
-      const text = await resp.text();
-      let data;
-      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-      if (!resp.ok) {
-        const err = new Error(`API ${method} ${path} failed: ${resp.status}`);
-        err.status = resp.status;
-        err.data = data;
-        throw err;
-      }
-      return data;
-    };
-
-    try {
-      return await doReq(tokenObj.access_token);
-    } catch (e) {
-      // Auto refresh on 401
-      if (e.status === 401) {
-        const newToken = await refreshAccessToken(clientId);
-        return await doReq(newToken);
-      }
-      throw e;
-    }
-  }
-
-  // ====== Auth flow (PKCE) ======
-  async function login() {
-    const clientId = $("clientId").value.trim();
-    if (!clientId) { alert("Paste your Client ID first."); return; }
-
-    const verifier = randomString(64);
-    const challenge = await pkceChallengeFromVerifier(verifier);
-    localStorage.setItem(LS.verifier, verifier);
-
-    const params = new URLSearchParams({
-      response_type: "code",
-      client_id: clientId,
-      scope: SCOPES,
-      redirect_uri: REDIRECT_URI,
-      code_challenge_method: "S256",
-      code_challenge: challenge
-    });
-
-    window.location = `${AUTH_ENDPOINT}?${params.toString()}`;
-  }
-
-  async function handleRedirectIfNeeded() {
-    const url = new URL(window.location.href);
-    const code = url.searchParams.get("code");
-    const error = url.searchParams.get("error");
-    if (error) {
-      log(`Auth error: ${error}`);
-      url.searchParams.delete("error");
-      history.replaceState({}, document.title, url.toString());
-      return;
-    }
-    if (!code) return;
-
-    const clientId = $("clientId").value.trim();
-    if (!clientId) {
-      alert("Paste Client ID first, then refresh. (We need it to exchange the code.)");
-      return;
-    }
-
-    const verifier = localStorage.getItem(LS.verifier);
-    if (!verifier) {
-      alert("Missing code_verifier (storage cleared?). Click Login again.");
-      return;
-    }
-
-    const body = new URLSearchParams();
-    body.set("client_id", clientId);
-    body.set("grant_type", "authorization_code");
-    body.set("code", code);
-    body.set("redirect_uri", REDIRECT_URI);
-    body.set("code_verifier", verifier);
-
-    const resp = await fetch(TOKEN_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body
-    });
-
-    const data = await resp.json();
-    if (!resp.ok) {
-      log(`Token exchange failed: ${resp.status} ${JSON.stringify(data)}`);
-      alert("Token exchange failed — check console/log.");
-      return;
-    }
-
-    localStorage.setItem(LS.access, data.access_token);
-    if (data.refresh_token) localStorage.setItem(LS.refresh, data.refresh_token);
-    const expiresAt = Date.now() + (data.expires_in * 1000) - 5000;
-    localStorage.setItem(LS.exp, String(expiresAt));
-    log("Logged in and stored tokens.");
-
-    // Clean URL
-    url.searchParams.delete("code");
-    url.searchParams.delete("state");
-    history.replaceState({}, document.title, url.toString());
-
-    setAuthStatus();
-  }
-
-  // ====== Devices ======
-  async function refreshDevices() {
-    const data = await apiFetch("/me/player/devices");
-    const sel = $("deviceSelect");
-    sel.innerHTML = "";
-    const devices = data?.devices || [];
-    if (!devices.length) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(No devices found — open Spotify on phone/desktop)";
-      sel.appendChild(opt);
-      return;
-    }
-    for (const d of devices) {
-      const opt = document.createElement("option");
-      opt.value = d.id || "";
-      opt.textContent = `${d.name} — ${d.type}${d.is_active ? " (active)" : ""}`;
-      if (d.is_active) opt.selected = true;
-      sel.appendChild(opt);
-    }
-    log(`Loaded ${devices.length} device(s).`);
-  }
-
-  async function transferToSelected() {
-    const device_id = $("deviceSelect").value;
-    if (!device_id) { alert("Pick a device."); return; }
-    await apiFetch("/me/player", { method: "PUT", json: { device_ids: [device_id], play: true } });
-    log(`Transferred playback to device ${device_id}.`);
-  }
-
-  // ====== Search + Play ======
-  async function searchTracks() {
-    const q = $("query").value.trim();
-    if (!q) return;
-    const data = await apiFetch("/search", { query: { q, type: "track", limit: 10 } });
-    const items = data?.tracks?.items || [];
-    const results = $("results");
-    results.innerHTML = "";
-
-    if (!items.length) {
-      results.textContent = "No results.";
-      return;
-    }
-
-    for (const t of items) {
-      const div = document.createElement("div");
-      div.className = "track";
-      const artist = (t.artists || []).map(a => a.name).join(", ");
-      div.innerHTML = `
-        <div>
-          <div><strong>${t.name}</strong></div>
-          <div class="muted">${artist}</div>
-          <div class="muted"><code>${t.uri}</code></div>
-        </div>
-        <div style="display:flex; gap:8px; align-items:center;">
-          <button data-uri="${t.uri}">Play</button>
-        </div>
-      `;
-      div.querySelector("button").addEventListener("click", async (e) => {
-        const uri = e.target.getAttribute("data-uri");
-        await playTrack(uri);
-      });
-      results.appendChild(div);
-    }
-    log(`Search ok: "${q}"`);
-  }
-
-  async function playTrack(trackUri) {
-    // If you want to force a specific device, pick it here:
-    const device_id = $("deviceSelect").value || null;
-
-    // Start playback of that single track
-    await apiFetch("/me/player/play", {
-      method: "PUT",
-      deviceId: device_id,
-      json: { uris: [trackUri] }
-    });
-    log(`Playing: ${trackUri}`);
-  }
-
-  // ====== Seek ======
-  async function seek() {
-    const position_ms = Number($("seekMs").value);
-    if (!Number.isFinite(position_ms) || position_ms < 0) {
-      alert("Enter a valid non-negative position_ms");
-      return;
-    }
-    const device_id = $("deviceSelect").value || null;
-
-    // Seek to position in current track
-    await apiFetch("/me/player/seek", {
-      method: "PUT",
-      deviceId: device_id,
-      query: { position_ms }
-    });
-    log(`Seeked to ${position_ms} ms`);
-  }
-
-  // ====== Wire up UI ======
-  $("loginBtn").addEventListener("click", login);
-  $("logoutBtn").addEventListener("click", () => { clearToken(); log("Logged out."); });
-
-  $("refreshDevicesBtn").addEventListener("click", async () => {
-    try { await refreshDevices(); }
-    catch (e) { log(`Devices error: ${e.message} ${JSON.stringify(e.data || "")}`); }
+  const params=new URLSearchParams({
+    response_type:"code",
+    client_id:CLIENT_ID,
+    scope:SCOPES,
+    redirect_uri:REDIRECT_URI,
+    code_challenge_method:"S256",
+    code_challenge:challenge
   });
 
-  $("transferBtn").addEventListener("click", async () => {
-    try { await transferToSelected(); }
-    catch (e) { log(`Transfer error: ${e.message} ${JSON.stringify(e.data || "")}`); }
+  window.location=`${AUTH_ENDPOINT}?${params.toString()}`;
+}
+
+async function exchangeCode(){
+  const url=new URL(window.location);
+  const code=url.searchParams.get("code");
+  if(!code) return;
+
+  const verifier=localStorage.getItem(LS.verifier);
+  const body=new URLSearchParams({
+    client_id:CLIENT_ID,
+    grant_type:"authorization_code",
+    code,
+    redirect_uri:REDIRECT_URI,
+    code_verifier:verifier
   });
 
-  $("searchBtn").addEventListener("click", async () => {
-    try { await searchTracks(); }
-    catch (e) { log(`Search error: ${e.message} ${JSON.stringify(e.data || "")}`); }
+  const resp=await fetch(TOKEN_ENDPOINT,{
+    method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body
   });
 
-  $("seekBtn").addEventListener("click", async () => {
-    try { await seek(); }
-    catch (e) { log(`Seek error: ${e.message} ${JSON.stringify(e.data || "")}`); }
-  });
+  const data=await resp.json();
+  localStorage.setItem(LS.access,data.access_token);
+  localStorage.setItem(LS.refresh,data.refresh_token);
+  localStorage.setItem(LS.exp,Date.now()+data.expires_in*1000);
 
-  // On load:
+  url.searchParams.delete("code");
+  history.replaceState({},document.title,url.toString());
   setAuthStatus();
-  handleRedirectIfNeeded().then(() => {
-    setAuthStatus();
-    // Best-effort devices refresh after login
-    if (getToken()) refreshDevices().catch(() => {});
+}
+
+function getToken(){
+  return localStorage.getItem(LS.access);
+}
+
+function setAuthStatus(){
+  $("authStatus").innerHTML=getToken()
+    ? "✅ Logged in"
+    : "<span class='danger'>❌ Not logged in</span>";
+}
+
+async function api(path,{method="GET",query=null,json=null,deviceId=null}={}){
+  const token=getToken();
+  const url=new URL(API_BASE+path);
+  if(query) Object.entries(query).forEach(([k,v])=>url.searchParams.set(k,v));
+  if(deviceId) url.searchParams.set("device_id",deviceId);
+
+  const resp=await fetch(url,{
+    method,
+    headers:{
+      "Authorization":`Bearer ${token}`,
+      ...(json?{"Content-Type":"application/json"}:{})
+    },
+    body:json?JSON.stringify(json):undefined
   });
+
+  if(resp.status===204) return null;
+  return resp.json();
+}
+
+async function refreshDevices(){
+  const data=await api("/me/player/devices");
+  const sel=$("deviceSelect");
+  sel.innerHTML="";
+  data.devices.forEach(d=>{
+    const opt=document.createElement("option");
+    opt.value=d.id;
+    opt.textContent=`${d.name} (${d.type})`;
+    if(d.is_active) opt.selected=true;
+    sel.appendChild(opt);
+  });
+}
+
+async function transfer(){
+  const device_id=$("deviceSelect").value;
+  await api("/me/player",{method:"PUT",json:{device_ids:[device_id],play:true}});
+}
+
+async function search(){
+  const q=$("query").value;
+  const data=await api("/search",{query:{q,type:"track",limit:5}});
+  const results=$("results");
+  results.innerHTML="";
+  data.tracks.items.forEach(t=>{
+    const div=document.createElement("div");
+    div.className="track";
+    div.innerHTML=`<div><strong>${t.name}</strong> - ${t.artists[0].name}</div>
+                   <button data-uri="${t.uri}">Play</button>`;
+    div.querySelector("button").onclick=()=>play(t.uri);
+    results.appendChild(div);
+  });
+}
+
+async function play(uri){
+  const device_id=$("deviceSelect").value;
+  await api("/me/player/play",{method:"PUT",deviceId:device_id,json:{uris:[uri]}});
+}
+
+async function seek(){
+  const device_id=$("deviceSelect").value;
+  const position_ms=$("seekMs").value;
+  await api("/me/player/seek",{method:"PUT",deviceId:device_id,query:{position_ms}});
+  log("Seeked to "+position_ms+" ms");
+}
+
+$("loginBtn").onclick=login;
+$("logoutBtn").onclick=()=>{localStorage.clear();setAuthStatus();}
+$("refreshDevicesBtn").onclick=refreshDevices;
+$("transferBtn").onclick=transfer;
+$("searchBtn").onclick=search;
+$("seekBtn").onclick=seek;
+
+exchangeCode();
+setAuthStatus();
 
 })();
 </script>
+
 </body>
 </html>
